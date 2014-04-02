@@ -1,0 +1,13 @@
+# my.cnf
+[client]
+host            = 127.0.0.1
+default-character-set=CHAR
+
+[mysql]
+prompt="HOSTNAME [\\d] [\\R:\\m:\\s]> "
+no-auto-rehash
+
+[mysqldump]
+quick
+max_allowed_packet = 32M
+

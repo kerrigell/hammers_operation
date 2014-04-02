@@ -1,0 +1,405 @@
+#!/bin/bash
+# used for nrpe to monitor mysql 
+# filename check_mysql_cyou
+# v1.0 Created by Penghy 20120917
+# v1.1 Updated by Penghy 20121120
+# v1.2 Updated by Penghy 20130110
+	#-- Updated function check_threads_jitter() to really catch Server lose connections with db
+# v1.3 Updated by Penghy 20130523
+	#-- Updated the command string get variable ${all_scoketfiles}
+	#-- Old all_socketfiles=(`ls -1 /home/mysql*/mysql.sock 2>/dev/null`) 2> /dev/null
+# v1.4 Updated by Penghy 20130731
+	#-- Added function to check max_connections variables in mysql
+# v1.5 Updated by Penghy 20130819
+	#-- Merged check_max_conn and check_jitter to check_conn
+# v1.6 Updated by Penghy 20130828
+	#-- Updated check_slave_threads. if some mysql is not a slave, return OK.
+# v1.7 UPdated by Penghy 20131114
+    #-- Updated check_conn. Excluded slave threads from connection count.
+
+source /etc/profile &> /dev/null
+export PATH=$PATH:/usr/local/mysql/bin
+
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+mkdir -p /usr/local/nagios/libexec/tmp
+is_mysqld_multi_used=`grep -c mysqld_multi /etc/my.cnf 2>/dev/null`
+all_datadir=(`ls -1Fd /home/mysql* 2>/dev/null | egrep '/$' | egrep "mysql_[0-9]{4}/|mysql/"`) 
+all_socketfiles=(`for dir in ${all_datadir[@]}; do ls -1 ${dir}mysql.sock 2>/dev/null;done`) 2> /dev/nul
+all_ip=`ifconfig | egrep -o "inet addr:([0-9]+\.){3}[0-9]+" | egrep -o "([0-9]+\.){3}[0-9]+" | tr '\n' '|' | sed 's/|$//g'`
+[ `ps aux | grep mysql | grep -v check_mysql_cyou | grep -v grep | wc -l` -eq 0 ] && echo "UNKNOWN - NO MYSQL HERE!!"  && exit ${STATE_UNKNOWN}
+
+### {{{ check_ping()
+check_ping()
+{
+	echo -n > ${tmplog}
+	# this part will check through my.cnf
+	if [ ${is_mysqld_multi_used} -ne 0 ]; then
+		mysqld_multi report | tail -n +2 | cut -d: -f2 | sed 's/^ //g' | sed 's/running/alive/g' | sed 's/mysqld//g' >> ${tmplog}
+	else
+	# this part will check by sockets file
+		echo -n > ${tmplog}
+		for path in ${all_datadir[@]};
+		do
+			port=`echo ${path} | egrep -o [0-9]{4}`
+			[[ -z ${port} ]] && port=3306
+			if [ -e ${path}mysql.sock ]; then
+				echo -n "${port} " >> ${tmplog}
+				mysqladmin -S ${path}mysql.sock ping | sed 's/mysqld //g' >> ${tmplog}
+			else
+				echo "${port} is not alive" >> ${tmplog}
+			fi
+		done
+	fi
+	
+	if [ `grep -vc "is alive" ${tmplog}` -eq 0 ]; then
+		result=`cat ${tmplog}`
+		message="OK - all instance is alive\n${result}"
+		echo -e "${message}"
+		exit ${STATE_OK}
+	else
+		result=`cat ${tmplog}`
+		message="CRITICAL - not all instance is alive\n${result}"
+		echo -e "${message}"
+		exit ${STATE_CRITICAL}
+	fi
+}
+
+### }}}
+### {{{ check_slave_threads()
+check_slave_threads()
+{
+	echo -n > ${tmplog}
+	for sock in ${all_socketfiles[@]};
+	do
+		port=`ps aux | grep ${sock} | egrep -o '\-\-port=[0-9]{4}' | egrep -o [0-9]{4} | uniq`
+		slave_status=`mysql -S ${sock} -e "SHOW SLAVE STATUS \G" 2> /dev/null`
+	
+		if [[ -z `echo -e "${slave_status}" | grep Running` ]] || [[ `echo -e "${slave_status}" | grep -i Master_Host | egrep -c ${all_ip}` -ne 0 ]]; then
+			echo -e "${port} is not a slave" >> ${tmplog}
+		else
+			echo -e "${slave_status}" | grep Running | sed "s/^ */${port} /g" >> ${tmplog}
+		fi
+	done
+	
+	if [ `egrep -ic "Running: No" ${tmplog}` -ne 0 ]; then
+		result=`cat ${tmplog}`
+		message="CRITICAL - some slave threads is not alive\n${result}"
+		echo -e "${message}"
+		exit ${STATE_CRITICAL}
+	elif [ `egrep -ic "not a slave" ${tmplog}` -ne 0 ]; then
+		result=`cat ${tmplog}`
+		message="OK - but some mysql is not a slave\n${result}"
+		echo -e "${message}"
+		exit ${STATE_OK}
+	elif [ `egrep -ic "Running: No" ${tmplog}` -eq 0 ] && [ `egrep -ic "not a slave" ${tmplog}` -eq 0 ]; then
+		result=`cat ${tmplog}`
+		message="OK - all slave threads is alive\n${result}"
+		echo -e "${message}"
+		exit ${STATE_OK}
+	fi
+	
+}
+### }}}
+### {{{ check_slave_lag()
+check_slave_lag()
+{
+	[ -z ${warning} ] && warning=5
+	[ -z ${critical} ] && critical=10
+	echo -n > ${tmplog}
+	echo -n > ${perflog}
+	for sock in ${all_socketfiles[@]};
+	do
+		port=`ps aux | grep ${sock} | egrep -o '\-\-port=[0-9]{4}' | egrep -o [0-9]{4} | uniq`
+		slave_status=`mysql -S ${sock} -e "SHOW SLAVE STATUS \G" 2> /dev/null`
+	
+		if [[ -z `echo -e "${slave_status}" | grep Running` ]] || [[ `echo -e "${slave_status}" | grep -i Master_Host | egrep -c ${all_ip}` -ne 0 ]]; then
+		#if [[ -z `echo -e "${slave_status}" | grep Running` ]]; then
+			echo -e "${port} is not a slave" >> ${tmplog}
+		else
+			slave_lag=`echo -e "${slave_status}" | grep -i Seconds_Behind_Master | awk '{print $2}'`
+			echo -e "${port} slave lag value is ${slave_lag}" >> ${tmplog}
+			echo -e "lag_${port}=${slave_lag}" >> ${perflog}
+		fi
+	done
+
+    if [ `cut -d= -f2 ${perflog} | awk '$1>=critical {print $1}' critical=${critical} | wc -l` -ne 0 ]; then
+        result=`awk '$NF>=critical {print $0}' critical=$critical ${tmplog}`
+        perf=`cat ${perflog}`
+        message="CRITICAL - ${result} | ${perf}"
+        echo -e "${message}"
+        exit ${STATE_CRITICAL}
+    elif [ `cut -d= -f2 ${perflog} | awk '$1>=warning && $1<critical {print $1}' warning=${warning} critical=${critical} | wc -l` -ne 0 ]; then
+        result=`awk '$NF>=warning && $NF<critical {print $0}' warning=${warning} critical=$critical ${tmplog}`
+        perf=`cat ${perflog}`
+        message="WARNNING -  ${result} | ${perf}"
+        echo -e "${message}"
+        exit ${STATE_WARNING}
+	elif [ `egrep -ic "not a slave" ${tmplog}` -ne 0 ]; then
+		result=`cat ${tmplog}`
+		message="OK - but some mysql is not a slave\n${result}"
+		echo -e "${message}"
+		exit ${STATE_OK}
+    else
+        result=`cat ${tmplog}`
+        perf=`cat ${perflog}`
+        message="OK - all slave lag is less than ${warning} \n${result} | ${perf}"
+        echo -e "${message}"
+        exit ${STATE_OK}
+    fi
+}
+### }}}
+### {{{ check_slow_query()
+check_slow_query()
+{
+	[ -z ${warning} ] && warning=1
+	[ -z ${critical} ] && critical=100
+	echo -n > ${tmplog}
+        echo -n > ${perflog}
+	end_timestamp=`date +%s`
+	start_timestamp=$(( ${end_timestamp} - 300 ))
+        for sock in ${all_socketfiles[@]};
+        do      
+		slowlog=${sock/mysql.sock/slow.log}
+        port=`ps aux | grep ${sock} | egrep -o '\-\-port=[0-9]{4}' | egrep -o [0-9]{4} | uniq`
+		if [[ -f ${slowlog} ]]; then
+			count_slow_queries=`grep timestamp ${slowlog} | egrep -o "[0-9]+" | awk '$1>tstart && $1<tend {print $1}' tend=${end_timestamp} tstart=${start_timestamp} | wc -l`
+			echo -e "${port} has slow queries ${count_slow_queries}" >> ${tmplog}
+			echo -e "slow_queries_${port}=${count_slow_queries}" >> ${perflog}
+		else
+			echo -e "${port} has no slow logs" >> ${tmplog}
+		fi
+        done
+
+	if [ `egrep -ic "no slow logs" ${tmplog}` -ne 0 ]; then
+                message="UNKNOW - some mysql has no slow log"
+                echo -e "${message}"
+                exit ${STATE_UNKNOWN}
+        elif [ `cut -d= -f2 ${perflog} | awk '$1>=critical {print $1}' critical=${critical} | wc -l` -ne 0 ]; then
+                result=`awk '$NF>=critical {print $0}' critical=${critical} ${tmplog}`
+                perf=`cat ${perflog}`
+                message="CRITICAL - ${result} | ${perf}"
+                echo -e "${message}"
+                exit ${STATE_CRITICAL}
+        elif [ `cut -d= -f2 ${perflog} | awk '$1>=warning && $1<critical {print $1}' warning=${warning} critical=${critical} | wc -l` -ne 0 ]; then
+                result=`awk '$NF>=warning && $NF<critical {print $0}' warning=${warning} critical=${critical} ${tmplog}`
+                perf=`cat ${perflog}`
+                message="WARNNING -  ${result} | ${perf}"
+                echo -e "${message}"
+                exit ${STATE_WARNING}
+        else
+                result=`cat ${tmplog}`
+                perf=`cat ${perflog}`
+                message="OK - there has no slow queries \n${result} | ${perf}"
+                echo -e "${message}"
+                exit ${STATE_OK}
+        fi
+}
+### }}}
+### {{{ check_innodb_row_lock_current_waits()
+check_innodb_row_lock_current_waits()
+{
+	[ -z ${warning} ] && warning=1
+	[ -z ${critical} ] && critical=100
+	echo -n > ${tmplog}
+        echo -n > ${perflog}
+        for sock in ${all_socketfiles[@]};
+        do      
+                port=`ps aux | grep ${sock} | egrep -o '\-\-port=[0-9]{4}' | egrep -o [0-9]{4} | uniq`
+		row_lock_waits=`mysqladmin -S ${sock} extend status | grep -i innodb_row_lock_current_waits | egrep -o [0-9]+\.?[0-9]*`
+		echo -e "${port} innodb_row_lock_current_waits value is ${row_lock_waits}" >> ${tmplog}
+		echo -e "innodb_row_lock_current_waits_${port}=${row_lock_waits}" >> ${perflog}
+        done
+
+
+        if [ `cut -d= -f2 ${perflog} | awk '$1>=critical {print $1}' critical=${critical} | wc -l` -ne 0 ]; then
+                result=`awk '$NF>=critical {print $0}' critical=${critical} ${tmplog}`
+                perf=`cat ${perflog}`
+                message="CRITICAL - ${result} | ${perf}"
+                echo -e "${message}"
+                exit ${STATE_CRITICAL}
+        elif [ `cut -d= -f2 ${perflog} | awk '$1>=warning && $1<critical {print $1}' warning=${warning} critical=${critical} | wc -l` -ne 0 ]; then
+                result=`awk '$NF>=warning && $NF<critical {print $0}' warning=${warning} critical=${critical} ${tmplog}`
+                perf=`cat ${perflog}`
+                message="WARNNING -  ${result} | ${perf}"
+                echo -e "${message}"
+                exit ${STATE_WARNING}
+        else
+                result=`cat ${tmplog}`
+                perf=`cat ${perflog}`
+                message="OK - ${result} | ${perf}"
+                echo -e "${message}"
+                exit ${STATE_OK}
+        fi
+}
+### }}}
+### {{{ check_conn() 
+check_conn()
+{
+	pslog=/usr/local/nagios/libexec/tmp/threads_count_history.tmp
+	warning_max_conn=200
+	[ -z ${warning} ] && warning=3
+	[ -z ${critical} ] && critical=0
+	echo -n > ${tmplog}
+	echo -n > ${perflog}
+
+	[ ! -s ${pslog} ] && echo "# This file is used to log mysql threads count info, don\'t modify it" >> ${pslog}
+
+		
+	for sock in ${all_socketfiles[@]};
+	do
+		conn=`mysqladmin -S ${sock} extend status | grep -i threads_connected | egrep -o [0-9]+`
+        excluding_conn=`mysqladmin -S ${sock} pr | egrep -c 'rep_user|system user'`
+		max_conn=`mysqladmin -S ${sock} variables | grep max_connections | egrep -o '[0-9]+'`
+		conn=$(( ${conn} - 1 - ${excluding_conn} ))
+		port=`ps aux | grep ${sock} | egrep -o '\-\-port=[0-9]{4}' | egrep -o [0-9]{4} | uniq`
+		is_tlbb=`mysqlshow -S ${sock} | grep -qw tlbbdb && echo ok || echo false`
+		is_ldj=`mysqlshow -S ${sock} | grep -qw ldjdb && echo ok || echo false`
+
+		# this part will collect mysql thread count history info
+		! egrep ^port${port} ${pslog} &> /dev/null && echo port${port} >> ${pslog}
+		if [ `grep port${port} ${pslog} | awk '{print NF}'` -eq 5 ]; then
+			newline=`grep port${port} ${pslog} | awk '{print $1,$3,$4,$5,conn}' conn=${conn}`
+		fi
+		if [ `grep port${port} $pslog | awk '{print NF}'` -lt 5 ]; then
+			newline="`grep port${port} ${pslog}` ${conn}"
+		fi
+		sed -i /port${port}/d ${pslog}
+		echo -e ${newline} >> ${pslog}
+
+		# this part will figure out thread count jitter and write it to log file. if any unexpected status happens, this process will exit with error code 2
+		if [ `grep port${port} ${pslog} | awk '{print NF}'` -eq 5 ]; then
+			jitter=`grep port${port} ${pslog} | awk '{print $5-($2+$3+$4)/3}' | awk '{print sqrt($1*$1)}'`
+			echo -e "${port} has threads ${conn} connected under a max_connection ${max_conn} and the count jitter is ${jitter}" >> ${tmplog}
+			if [[ ${is_tlbb} == "ok" ]] && [[ ${max_conn} -lt 60 ]]; then
+				echo -e "is_max_conn_${port}_qualified=false" >> ${tmplog}
+			elif [[ ${is_ldj} == "ok" ]] && [[ ${max_conn} -lt 350 ]]; then
+				echo -e "is_max_conn_${port}_qualified=false" >> ${tmplog}
+			elif [[ ${is_tlbb} == "false" ]] && [[ ${is_ldj} == "false" ]] && [[ ${max_conn} -lt ${warning_max_conn} ]]; then
+				echo -e "is_max_conn_${port}_qualified=false" >> ${tmplog}
+			else
+				echo -e "is_max_conn_${port}_qualified=ok" >> ${tmplog}
+			fi
+			echo -e "conn_${port}=${conn}" >> ${perflog}
+			echo -e "max_conn_${port}=${max_conn}" >> ${perflog}
+			echo -e "jitter_${port}=${jitter}" >> ${perflog}
+		elif [ `grep port${port} $pslog | awk '{print NF}'` -lt 5 ]; then
+			echo -e "UNKNOWN - ${port} is collecting threads count history info, please wait for next check"
+			exit ${STATE_UNKNOWN}
+		elif [ ! -s ${pslog} ]; then
+			echo -e "UNKNOWN - can't find count_processes_history log file"
+			exit ${STATE_UNKNOWN}
+		else
+			echo -e "unknow status, please contact author...." >> ${tmplog}
+			exit ${STATE_UNKNOWN}
+		fi
+	done
+
+	# this part will process tmplog and perflog to return check result
+	w_port=0
+	c_port=0
+	if [ `grep ^conn ${perflog} | awk -F'=' '$2<=critical {print $2}' critical=${critical} | wc -l` -ne 0 ]; then
+		idle_ports=`grep ^conn ${perflog} | awk -F'=' '$2<=critical {print $1}' critical=${critical} | egrep -o '[0-9]{4}'`
+		#result=`awk '$4<=critical {print $0}' critical=${critical} ${tmplog}`
+		for i_port in ${idle_ports}
+		do
+			i_jitter=`grep ^jitter_${i_port} ${perflog} | cut -d= -f2`
+			[ `echo "${i_jitter}>0" | bc` -eq 1 ] && let c_port++
+			[ `echo "${i_jitter}==0" | bc` -eq 1 ] && let w_port++
+		done
+
+	fi
+
+	m_port=0
+	m_port=`grep ^is_max_conn_ ${tmplog} | cut -d'=' -f2 | grep -c false`
+
+	perf=`cat ${perflog} | xargs`
+	[ ${c_port} -gt 0 ] && result="Threads connected of some mysql has reduce to ZERO !!!" && message="WARNING - ${result} | ${perf}" && echo -e "${message}" && exit ${STATE_WARNING}
+	[ ${m_port} -gt 0 ] && result="Some mysql's max_connections variable is less than ${warning_max_conn}!!" && message="WARNING - ${result} | ${perf}" && echo -e "${message}" && exit ${STATE_WARNING}
+	[ ${w_port} -gt 0 ] && result="But threads connected of some mysql is ZERO !!!" && message="OK - ${result} | ${perf}" && echo -e "${message}" && exit ${STATE_OK}
+
+	if [[ ${c_port} -eq 0 ]] && [[ ${m_port} -eq 0 ]] && [[ ${w_port} -eq 0 ]]; then
+		result=`cat ${tmplog}`
+		perf=`cat ${perflog} | xargs`
+		message="OK - Threads connected of all mysql looks like normal | ${perf}"
+		echo -e "${message}"
+		exit ${STATE_OK}
+	fi
+}
+### }}}
+
+### {{{ help()
+get_help()
+{
+	echo
+	echo -e "  useage:"
+	echo -e "\t$0 -e {check_entry} [-w {warning} -c {critical}]"
+	echo -e "  check_entry:"
+	echo -e "\tping threads lag slow lock jitter"
+    echo
+	echo -e "  check_entry explain:"
+	echo -e "\tping - ping your mysql instance use mysqladmin ping"
+	echo -e "\tthreads - check your mysql slave instance's I/O Threads and SQL Threads"
+	echo -e "\tlag - check your mysql slave instance's Seconds behind Master"
+	echo -e "\tslow - check how many slow queries happend in the past 300 seconds"
+	echo -e "\tlock - check your innodb_row_lock_current_waits value"
+	echo -e "\tconn - This function will check and return exception about mysql threads"
+	echo -e "\tmax_conn - check whether your mysql's max_connections parameter is too small"
+	echo -e "\tof mysql's instance every time when executing it, and compare the current value to the "
+	echo -e "\taverage of last three values; taking the absolute value of the difference between current"
+	echo -e "\tand average values as the jitter value of mysql's connection, and then return the jitter value."
+	echo 
+}
+### }}}
+
+### {{{ get optings
+while getopts "e:w:c:" OPT; do
+	case $OPT in
+		"e") 
+		check_entry=$OPTARG
+		tmplog=/usr/local/nagios/libexec/tmp/check_mysql_${check_entry}.tmp
+		perflog=/usr/local/nagios/libexec/tmp/check_mysql_perf_${check_entry}.tmp
+		;;
+		"w") warning=$OPTARG;;
+		"c") critical=$OPTARG;;
+	esac
+
+done
+### }}}
+
+### {{{ case statement
+case "${check_entry}" in
+
+	'ping')
+	check_ping
+	;;
+
+	'threads')
+	check_slave_threads
+	;;
+	
+	'lag')
+	check_slave_lag
+	;;
+
+	'slow')
+	check_slow_query
+	;;
+
+	'lock')
+	check_innodb_row_lock_current_waits
+	;;
+
+	'conn')
+	check_conn
+	;;
+
+	*)
+	get_help
+	;;
+esac
+### }}}

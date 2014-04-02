@@ -1,0 +1,24 @@
+#!/bin/bash
+
+##############################################
+#	This script is used to gather Cpu,       #
+#   Memery and disk usage info. By Phang     #
+##############################################
+#     Modified @20130128. Add top usage      #
+
+
+suffix=`date +%d --date="-1 day"`
+[ -e /usr/local/bin/sar ] && SAR='/usr/local/bin/sar' || SAR=`which sar`
+
+pcpu=`${SAR} -f /var/log/sa/sa${suffix} | tail -1 | awk '{print 100.00-$NF}'` &>/dev/null && is_suc_pcpu=0 || is_suc_pcpu=1
+pmem=`${SAR} -r -f /var/log/sa/sa${suffix} | tail -1 | awk '{print $4}'` &>/dev/null && is_suc_pmem=0 || is_suc_pmem=1
+tcpu=`${SAR} -f /var/log/sa/sa${suffix} | egrep -v '^$|%|Average|Linux' | awk 'BEGIN{min=100} $NF<min{min=$NF}END{print min}' | awk '{print 100.00-$1}' ` &> /dev/null && is_suc_tcpu=0 || is_suc_tmem=1
+tmem=`${SAR} -r -f /var/log/sa/sa${suffix} | egrep -v '^$|%|Average|Linux' | awk 'BEGIN{max=0} $5>max{max=$5}END{print max}'` &> /dev/null && is_suc_tcpu=0 || is_suc_tmem=1
+
+if [ ${is_suc_pcpu} -eq 0 ] && [ ${is_suc_pmem} -eq 0 ]; then
+	echo -e "OK - Usage gathering succeed ! | pcpu=${pcpu}%;pmem=${pmem}%;tcpu=${tcpu}%;tmem=${tmem}%"
+	exit 0
+else
+	echo -e "UNKNOWN - Cannot get usage info !"
+	exit 3
+fi

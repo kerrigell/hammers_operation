@@ -1,0 +1,45 @@
+#!/bin/bash
+# used for monitor hardware satatus
+# filename check_scurity
+# v1.0 Created by Penghy 20130402
+
+source /etc/profile &> /dev/null
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+legal_ip_prefix="
+172.16
+10.10
+192.168
+172.0
+180.148
+10.6
+220.181
+"
+
+# Illegal IP segment login
+la=`LANG=en; last -a | egrep -v -e 'wtmp|system|^$|tty'|grep -vP "0.0.0.0|cyou" |awk '{print $NF}' | awk -F. '{print $1"."$2}' | sort -u | xargs | sed 's/ /|/g'`
+ct_illegal_la=`echo  "${la}" | egrep -v "${legal_ip_prefix}" | wc -l`
+illegal_la=`echo "${la}" | egrep -v "${legal_ip_prefix}"`
+# tyy login
+ct_tty_loging=`w | grep -i tty | grep -v 'LOGIN@' | wc -l `
+# failur ssh login
+ct_failure_ssh=`egrep -c 'Failed password for' /var/log/secure `
+
+
+if [[ ${ct_illegal_la} -gt 0 ]] || [[ ${ct_tty_loging} -gt 0 ]] || [[ ${ct_failure_ssh} -gt 5 ]]; then
+    message="Warning - Illegal login founded:"
+    [[ ${ct_illegal_la} -gt 0 ]] && message="${message} illegal ip: ${illegal_la}"
+    [[ ${ct_tty_loging} -gt 0 ]] && message="${message} tty login : ${ct_tty_loging}"
+    [[ ${ct_failure_ssh} -gt 5 ]] && message="${message} failure ssh login: ${ct_failure_ssh}"
+    echo -e "${message}"
+    exit ${STATE_WARNING}
+else
+	message="OK - Everything is ok!"
+	echo -e "${message}"
+	exit ${STATE_OK}
+fi
+

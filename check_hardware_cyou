@@ -1,0 +1,190 @@
+#!/bin/bash
+# used for monitor hardware satatus
+# filename check_hardware_cyou
+# v2.0 Created by Penghy 20130401
+#  v2.1 Updated by Penghy 20131104
+#   Added the functionality to check Raid Battery Status of HP machine.
+#  v2.2 Updated by Penghy 20131114
+#   Bug fixes
+
+source /etc/profile &> /dev/null
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+function disk(){
+    if [[ `/sbin/lspci | grep "RAID bus" | egrep -c "Hewlett-Packard"` -eq 1 ]]; then
+        raid_vender="HP"
+    elif [[ `/sbin/lspci | grep "RAID bus" | egrep -c "Dell|LSI Logic"` -eq 1 ]]; then
+        raid_vender="DELL"
+    else
+        raid_vender="No Raid Controller"
+    fi
+
+    if [[ ${ignore} == 'raid' ]] && [[ ${raid_vender} == "No Raid Controller" ]]; then
+        message="OK - This machine has been ignored by sa"
+        echo -e "${message}"
+        exit ${STATE_OK}
+    elif [[ ${ignore} == 'raid' ]] && [[ ${raid_vender} != "No Raid Controller" ]]; then
+        message="UNKNOWN - This machine has raid controller but ignored"
+        echo -e "${message}"
+        exit ${STATE_UNKNOWN}
+    fi
+
+    if [[ ${raid_vender} == "No Raid Controller" ]]; then
+        message="UNKNOWN - No raid card here!"
+        echo -e ${message}
+        exit ${STATE_UNKNOWN}
+    elif [[ ${raid_vender} == "HP" ]]; then
+        slot_no=`hpacucli controller all show | egrep -o 'Slot [0-9]+' | cut -d' ' -f2 2>/dev/null`
+        [[ ${slot_no} ]] && hpacucli_status=`hpacucli controller slot=${slot_no} show &>/dev/null && echo ok || echo false` || hpacucli_status="false"
+        if [[ ${hpacucli_status} == "false" ]]; then
+            message="UNKNOWN - hpacucli is not available"
+            echo -e ${message}
+            exit ${STATE_UNKNOWN}
+        elif [[ ${hpacucli_status} == "ok" ]]; then
+            # Checking about Raid Battery
+            battery_count=`hpacucli controller slot=${slot_no} show | grep -i "Battery/Capacitor Count:" | awk '{print $NF}'`
+            if [[ ${battery_count} -eq 0 ]]; then
+                message="CRITICAL - No Raid Battery!!"
+                echo -e ${message}
+                exit ${STATE_CRITICAL}
+            else
+                [[ `hpacucli controller slot=${slot_no} show status | grep 'Battery/Capacitor Status:' | awk '{printf $NF}'` == 'OK' ]] && battery_status="ok" || battery_status="false"
+                if [[ ${battery_status} == "false" ]]; then
+                    message="CRITICAL - Raid Battery Failed!!"
+                    echo -e ${message}
+                    exit ${STATE_CRITICAL}
+                fi
+            fi
+            # Checking Physical Disks
+            ct_failed=`hpacucli controller slot=${slot_no} physicaldrive all show | egrep -c "Failed|Predictive Failure"`
+            if [[ ${ct_failed} -ne 0 ]]; then
+                message="CRITICAL - Some physical disk failed!"
+                echo -e ${message}
+                exit ${STATE_CRITICAL}
+            fi
+            # Checking No-Battery Write Cache
+            [[ `hpacucli controller slot=${slot_no} show | grep 'No-Battery Write Cache:' | awk '{print $NF}'` == 'Enabled' ]] && NBWC='ok' || NBWC='false'
+            if [[ ${NBWC} == 'false' ]]; then
+                message='WARNING - No-Battery Write Cache is disabled!'
+                echo -e ${message}
+                exit ${STATE_WARNING}
+            fi
+            # Checking Read/Write Policy
+            RW=(`hpacucli controller slot=${slot_no} show | grep 'Ratio' | cut -d: -f2 | egrep -o '[0-9]+'`)
+            RWP=`hpacucli controller slot=${slot_no} show | grep 'Ratio' | cut -d: -f2`
+            if [[ ${RW[0]} -eq 0 || ${RW[1]} -eq 0 ]]; then
+                message="WARNING - Cache Read/Write Policy is ${RWP}"
+                echo -e ${message}
+                exit ${STATE_WARNING}
+            fi
+
+            message="OK - Everything looks OK!"
+            echo -e ${message}
+            exit ${STATE_OK}
+        else
+            message="UNKNOWN - unknow status, please contact author"
+            echo -e ${message}
+            exit ${STATE_UNKNOWN}
+        fi
+    elif [[ ${raid_vender} == "DELL" ]]; then
+            MegaCli_status=`MegaCli -AdpAllInfo -aALL -NoLog &>/dev/null && echo ok || echo false`
+            if [[ ${MegaCli_status} == "false" ]]; then
+                    message="UNKNOWN - MegaCli is not available"
+                    echo -e ${message}
+                    exit ${STATE_UNKNOWN}
+            elif [[ ${MegaCli_status} == "ok" ]]; then
+                    ct_error_ct_10=`MegaCli -PDList -aALL | grep -i "Error Count" | egrep -o '[0-9]+$' | awk '$1>=10{print $0}' | wc -l`
+
+                    if [[ ${ct_error_ct_10} -gt 0 ]]; then
+                            message="CRITICAL - Some physical disk's Error Count >= 10"
+                            echo -e ${message}
+                            exit ${STATE_CRITICAL}
+                    else
+                            message="OK - All physical disk status is ok!"
+                            echo -e ${message}
+                            exit ${STATE_OK}
+                    fi
+            else
+                    message="UNKNOWN - unknow status, please contact author"
+                    echo -e ${message}
+                    exit ${STATE_UNKNOWN}
+            fi
+    else 
+            message="UNKNOWN - unknow status, please contact author"
+            echo -e ${message}
+            exit ${STATE_UNKNOWN}
+    fi
+}
+
+function nic_firmware(){
+    all_nic=(`ifconfig | grep -o '^eth[0-9]' | sort | uniq`)
+    for i in `seq ${#all_nic[@]}`
+    do
+            nic=${all_nic[${i}-1]}
+            nic_firmware_verison=`ethtool -i ${nic} | egrep '^version:' | egrep -o '[0-Z.-]+$'`
+            if [[ ${i} -eq 1 ]]; then
+                    if [[ ${nic_firmware_verison} == "1.9.20b" ]] || [[ ${nic_firmware_verison} == "2.0.2" ]]; then
+                            print_green "Nic Info: " && echo -e "${nic} ${nic_firmware_verison}"
+                    else
+                            print_green "Nic Info: " && print_yellow "${nic} ${nic_firmware_verison}"
+                    fi
+            else
+                    if [[ ${nic_firmware_verison} == "1.9.20b" ]] || [[ ${nic_firmware_verison} == "2.0.2" ]]; then
+                            echo -e "${nic} ${nic_firmware_verison}" | awk '{printf ("%20s%s\n"," ",$0)}'
+                    else
+                            print_yellow "${nic} ${nic_firmware_verison}" | awk '{printf ("%20s%s\n"," ",$0)}'
+                    fi
+            fi
+    done
+}
+
+get_help()
+{
+    echo
+    echo -e "  useage:"
+    echo -e "\t$0 -e {check_entry} [-w {warning} -c {critical}]"
+    echo -e "  check_entry:"
+    echo -e "\tdisk nic"
+    echo
+    echo -e "  check_entry explain:"
+    echo -e "\tdisk - check physical disk status | add -i to ignore a machine has no raid controller"
+    echo -e "\tnic - check nic firmware version"
+    echo 
+}
+
+
+while getopts "e:w:c:i" OPT; do
+    case $OPT in
+        "e") 
+        check_entry=$OPTARG
+        ;;
+        "w") 
+        warning=$OPTARG
+        ;;
+        "c") 
+        critical=$OPTARG
+        ;; "i")
+        ignore=raid
+        ;;
+    esac
+
+done
+
+case "${check_entry}" in
+
+    'disk')
+    disk
+    ;;
+
+    'nic')
+    nic_firmware
+    ;;
+
+    *)
+    get_help
+    ;;
+esac

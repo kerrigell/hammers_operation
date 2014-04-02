@@ -1,0 +1,38 @@
+#!/bin/bash
+
+ARGS=$(getopt -o h:u:p:P: --long hostname:,username:,password:,port: -n "help" -- "$@")
+eval set -- "${ARGS}" 
+ 
+while [ $# -gt 0 ]
+do  
+	case "$1" in 
+		-h|--hostname)  
+		hostname="$2" 
+		shift
+		;;
+		-u|--username)
+		username="$2"
+		shift
+		;;
+		-p|--password)
+		password="$2"
+		shift
+		;;
+		-P|--port)
+		port="$2"
+		shift
+		;;
+	esac
+	shift
+done
+
+
+is_ok=$(mysql -N --connect_timeout=6 -h${hostname} -u${username} -p${password} -P${port} -e "SELECT 1" 2>/dev/null | tee)
+
+if [ $is_ok -eq 1 2>/dev/null ]; then
+	echo "OK - RDS is alive !" 
+	exit 0
+else
+	echo "CRITICAL - RDS is down !"
+	exit 2
+fi

@@ -1,0 +1,86 @@
+#!/bin/bash
+# used for nrpe to monitor iptables status
+# filename check_iptables
+# v1.0 Created by Penghy 20130311
+
+source /etc/profile &> /dev/null
+export PATH=$PATH:/usr/local/mysql/bin
+
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+IPTABLES='/sbin/iptables'
+
+check_service_status(){
+	iptb_stat=`/etc/init.d/iptables status &>/dev/null; echo $?`
+	if [[ iptb_stat -eq 1 ]]; then
+		echo -e "CRITICAL - iptables is down!"
+		exit ${STATE_CRITICAL}
+	elif [[ iptb_stat -eq 0 ]]; then
+		num_rules=`iptables -nvL INPUT | egrep -v 'Chain|pkts|^$' | wc -l`
+		input_policy=`iptables -nvL INPUT | egrep -o 'policy [a-Z]+\b' | awk '{print $2}'`
+		last_target=` iptables -nvL INPUT | awk 'END{print $3}'`
+		is_vn=`/sbin/ifconfig | egrep -q '180.148|172.16.1' && echo True || echo False`
+		if [[ ${num_rules} -eq 0 ]]; then
+			if [[ ${is_vn} == 'False' ]];then
+				echo -e "CRITICAL - Iptables up but No Rules!"
+				exit ${STATE_CRITICAL}
+			fi
+		else
+			if [[ ${input_policy} == 'ACCEPT' ]] && [[ ${last_target} != 'DROP' && ${last_target} != 'REJECT' ]] && [[ ${is_vn} == 'False' ]]; then
+				echo -e "CRITICAL - Iptalbes up but rules ACCEPT everything"
+				exit ${STATE_CRITICAL}
+			fi
+		fi
+		echo -e "OK - iptables is up!"
+		exit ${STATE_OK}
+	fi
+}
+
+	
+
+### {{{ help()
+get_help()
+{
+	echo
+	echo -e "  useage:"
+	echo -e "\t$0 -e {check_entry} [-w {warning} -c {critical}]"
+	echo -e "  check_entry:"
+	echo -e "\tcheck_service_status"
+    echo
+	echo -e "  check_entry explain:"
+	echo -e "\tcheck_service_status - check if your server's iptables service is up"
+	echo 
+}
+### }}}
+
+### {{{ get optings
+while getopts "e:w:c:" OPT; do
+	case $OPT in
+		"e") 
+		check_entry=$OPTARG
+		tmplog=/usr/local/nagios/libexec/tmp/check_mysql_${check_entry}.tmp
+		perflog=/usr/local/nagios/libexec/tmp/check_mysql_perf_${check_entry}.tmp
+		;;
+		"w") warning=$OPTARG;;
+		"c") critical=$OPTARG;;
+	esac
+
+done
+### }}}
+
+### {{{ case statement
+case "${check_entry}" in
+
+	'check_service_status')
+	check_service_status
+	;;
+
+	*)
+	get_help
+	;;
+esac
+### }}}

@@ -1,0 +1,36 @@
+#!/bin/bash
+
+while getopts "w:c:" OPT; do
+	case $OPT in
+		"w") 
+		warning=$OPTARG
+		;;
+		"c")
+		critical=$OPTARG
+		;;
+	esac
+done
+
+MemTotal=`awk '/^MemTotal/ {print $2}' /proc/meminfo`
+MemFree=`awk '/^MemFree/ {print $2}' /proc/meminfo`
+Buffers=`awk '/^Buffers/ {print $2}' /proc/meminfo`
+Cached=`awk '/^Cached/ {print $2}' /proc/meminfo`
+
+memused=$(echo "scale=5;(1 - (${MemFree} + ${Buffers} + ${Cached})/${MemTotal})*100" | bc)
+
+warning=${warning:-85}
+critical=${critical:-95}
+
+if [[ `echo "${memused} < ${warning}" | bc` -eq 1 ]]; then
+	echo "OK - Memory used below ${warning}% | memused=${memused}% "
+	exit 0
+elif [[ `echo "${memused} >= ${warning}" | bc` -eq 1 && `echo "${memused} < ${critical}" | bc` -eq 1 ]]; then
+	echo "WARNING - Memory used between ${warning}% and ${critical}% | memused=${memused}% "
+	exit 1
+elif [[ `echo "${memused} >= ${critical}" | bc` -eq 1 ]]; then
+	echo "CRITICAL - Memory used more than ${critical}% | memused=${memused}% "
+	exit 2
+else
+	echo "UNKNOWN - Memory info unkown!"
+	exit 3
+fi

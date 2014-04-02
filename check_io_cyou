@@ -1,0 +1,103 @@
+#!/bin/bash
+# use for get IOPS, Throughput, %Utils, iowait info
+#file name: check_io.sh
+#Download from https://www.monitoringexchange.org/inventory/Check-Plugins/Operating-Systems/Linux/check_iostat---I-O-statistics
+#Modified by Penghy 20120822 , Add %util %iowait info, only&auto check /home partition
+
+iostat=`which iostat 2>/dev/null`
+bc=`which bc 2>/dev/null`
+
+function help {
+echo -e "\n\tcheck /home partition io information ,your can specify warning and critical value:\n"
+echo -e "\t\tIO per second (IOPS),\tIO count per second"
+echo -e "\t\tKB_read/s,\tread data per second(kb)"
+echo -e "\t\tKB_write,\twrite data per second(kb)"
+echo -e "\t\t%iowait,\tCPU's iowait"
+echo -e "\t\t%util,\tDisk Service time percentage"
+echo -e "\n\tuseage: \n\t\t$0 -w {value} -c {value}"
+echo -e "\t\t$0 help"
+echo -e "\n\tvalue: \n\t\t{IOPS},{read},{write},{iowait},{util}\n"
+	exit -1
+}
+
+[[ -z $1 ]] && help && exit -1
+[[ $1 == help ]] && help && exit -1
+# Ensuring we have the needed tools:
+( [ ! -f $iostat ] || [ ! -f $bc ] ) && \
+	( echo "ERROR: You must have iostat and bc installed in order to run this plugin" && exit -1 )
+
+# Getting parameters:
+while getopts "w:c:h" OPT; do
+	case $OPT in
+		"w") warning=$OPTARG;;
+		"c") critical=$OPTARG;;
+		"h") help;;
+	esac
+done
+
+# Adjusting the three warn and crit levels:
+warn_iops=`echo ${warning} | cut -d, -f1`
+warn_read=`echo ${warning} | cut -d, -f2`
+warn_write=`echo ${warning} | cut -d, -f3`
+warn_iowait=`echo ${warning} | cut -d, -f4`
+warn_util=`echo ${warning} | cut -d, -f5`
+
+crit_iops=`echo ${critical} | cut -d, -f1`
+crit_read=`echo ${critical} | cut -d, -f2`
+crit_write=`echo ${critical} | cut -d, -f3`
+crit_iowait=`echo ${critical} | cut -d, -f4`
+crit_util=`echo ${critical} | cut -d, -f5`
+
+
+# Checking parameters:
+( [[ -z "${warn_iops}" ]] || [[ -z "${crit_iops}" ]] || \
+  [[ -z "${warn_read}" ]] || [[ -z "${crit_read}" ]] || \
+  [[ -z "${warn_write}" ]] || [[ -z "${crit_write}" ]] || \
+  [[ -z "${warn_iowait}" ]] || [[ -z "${crit_iowait}" ]] || \
+  [[ -z "${warn_util}" ]] || [[ -z "${crit_util}" ]] ) && \
+  echo "ERROR: You must specify all warning and critical levels" && help
+
+( [[ "${warn_iops}" -gt "${crit_iops}" ]] || \
+  [[ "${warn_read}" -gt "${crit_read}" ]] || \
+  [[ "${warn_write}" -gt "${crit_write}" ]] || \
+  [[ "${warn_iowait}" -gt "${crit_iowait}" ]] || \
+  [[ "${warn_util}" -gt "${crit_util}" ]] ) && \
+  echo "ERROR: critical levels must be highter than warning levels" && help
+
+# Get /home partition's device
+device=`df | grep /home | awk '{print $1}'`
+
+
+# Doing the actual check:
+iops=`${iostat} ${device} | grep -A 1 tps | awk 'NR==2 {print $2}'`
+kbread=`${iostat} ${device} -k | grep 'read' -A 1 | awk 'NR==2 {print $3}'`
+kbwrite=`${iostat} ${device} -k | grep wrtn -A 1 | awk 'NR==2 {print $4}'`
+util=`${iostat} ${device} -x | grep util -A 1 | awk 'NR==2 {print $12}'`
+iowait=`${iostat} -c | grep iowait -A 1 | awk 'NR==2 {print $4}'`
+
+
+# Comparing the result and setting the correct level:
+if (  [ "`echo "${iops} >= ${crit_iops}" | ${bc}`" == "1" ] || \
+      [ "`echo "${kbread} >= ${crit_read}" | ${bc} `" == "1" ] || \
+      [ "`echo "${kbwrite} >= ${crit_write}" | ${bc} `" == "1" ] || \
+      [ "`echo "${util} >= ${crit_util}" | ${bc} `" == "1" ] || \
+      [ "`echo "${iowait} >= ${crit_iowait}" | ${bc} `" == "1" ] ); then
+	msg="CRITICAL"
+	status=2
+elif (  [ "`echo "${iops} >= ${warn_iops}" | ${bc}`" == "1" ] || \
+        [ "`echo "${kbread} >= ${warn_read}" | ${bc} `" == "1" ] || \
+        [ "`echo "${kbwrite} >= ${warn_write}" | ${bc} `" == "1" ] || \
+        [ "`echo "${util} >= ${warn_util}" | ${bc} `" == "1" ] || \
+        [ "`echo "${iowait} >= ${warn_iowait}" | ${bc} `" == "1" ] ); then
+	msg="WARNING"
+	status=1
+else
+	msg="OK"
+	status=0
+fi
+
+
+# Printing the results:
+echo "$msg - I/O stats iops=${iops} KB_read/s=${kbread} KB_written/s=${kbwrite} Util=${util} Iowait=${iowait} | 'iops'=${iops}; 'KB_read/s'=${kbread}KB; 'KB_written/s'=${kbwrite}KB; 'util'=${util}%; 'iowait'=${iowait}%;"
+
+exit $status
