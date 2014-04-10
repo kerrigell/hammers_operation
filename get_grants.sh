@@ -1,19 +1,19 @@
 #!/bin/bash
 
-while getopts "S:h:u:p" OPT; do
+while getopts "S:h:u:p:" OPT; do
     case $OPT in
-        "S") 
-		sock="-S $OPTARG"
-        ;;  
+        "S")
+        sock="-S $OPTARG"
+        ;;
         "h")
         host="-h $OPTARG"
-        ;;  
+        ;;
         "u")
         username="-u $OPTARG"
-        ;;  
+        ;;
         "p")
         password="-p$OPTARG"
-        ;;  
+        ;;
     esac
 
 done
@@ -21,7 +21,7 @@ done
 options="${sock} ${host} ${username} ${password}"
 
 rm -rf /tmp/.get_grants.tmp $> /dev/null
-mysql ${options} -N -e "SELECT user,host FROM  mysql.user WHERE user != 'root' INTO OUTFILE '/tmp/.get_grants.tmp';"
+mysql ${options} -N -e "SELECT user,host FROM  mysql.user WHERE user != 'root';" > /tmp/.get_grants.tmp
 
 while read LINE
 do
