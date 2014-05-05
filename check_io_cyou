@@ -72,7 +72,7 @@ device=`df | grep /home | awk '{print $1}'`
 iops=`${iostat} ${device} | grep -A 1 tps | awk 'NR==2 {print $2}'`
 kbread=`${iostat} ${device} -k | grep 'read' -A 1 | awk 'NR==2 {print $3}'`
 kbwrite=`${iostat} ${device} -k | grep wrtn -A 1 | awk 'NR==2 {print $4}'`
-util=`${iostat} ${device} -x | grep util -A 1 | awk 'NR==2 {print $12}'`
+util=`${iostat} ${device} -x | grep util -A 1 | awk 'NR==2 {print $NF}'`
 iowait=`${iostat} -c | grep iowait -A 1 | awk 'NR==2 {print $4}'`
 
 
